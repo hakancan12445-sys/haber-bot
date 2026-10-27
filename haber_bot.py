@@ -28,6 +28,14 @@ FEEDS = {
     "Medyascope": "https://medyascope.tv/feed/",
 }
 
+# Günlük haberler için ayrı bir kaynak listesi. Bu başlıklar anahtar kelime filtrelemesi
+# yapmaz; son 24 saat içinde yayınlanmış genel haberleri gönderir.
+DAILY_FEEDS = {
+    "BBC Türkçe": "https://feeds.bbci.co.uk/turkce/rss.xml",
+    "DW Türkçe": "https://rss.dw.com/xml/rss_tr_turkiye",
+    "NTV Gündem": "https://www.ntv.com.tr/gundem.rss",
+}
+
 # Sadece BAŞLIĞINDA bu ifadelerden biri geçen haberler gönderilir.
 # Listeyi boş bırakırsan ([]) tüm haberler gelir.
 KEYWORDS = [
@@ -115,10 +123,12 @@ def parse_feed(xml_bytes):
     return items
 
 
-def collect():
+def collect(used=None):
+    if used is None:
+        used = set()
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=WINDOW_HOURS)
-    sections, used, failed = [], set(), 0
+    sections, failed = [], 0
     for source, url in FEEDS.items():
         try:
             items = parse_feed(fetch(url))
@@ -146,6 +156,39 @@ def collect():
     return sections, failed
 
 
+def collect_daily(used=None):
+    if used is None:
+        used = set()
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=24)
+    sections, failed = [], 0
+    for source, url in DAILY_FEEDS.items():
+        try:
+            items = parse_feed(fetch(url))
+        except Exception as exc:
+            failed += 1
+            print(f"[uyarı] {source} alınamadı: {exc}", file=sys.stderr)
+            continue
+        fresh = [
+            (dt, t, l)
+            for t, l, dt in items
+            if dt is not None and dt >= cutoff
+        ]
+        fresh.sort(reverse=True)
+        picked = []
+        for dt, t, l in fresh:
+            if l in used:
+                continue
+            used.add(l)
+            picked.append((t, l))
+            if len(picked) >= MAX_PER_FEED:
+                break
+        print(f"{source}: {len(items)} günlük haber tarandı, {len(picked)} uygun.")
+        if picked:
+            sections.append((source, picked))
+    return sections, failed
+
+
 def build_messages(sections):
     now = datetime.now(TR).strftime("%d.%m.%Y %H:%M")
     blocks = []
@@ -157,7 +200,7 @@ def build_messages(sections):
             )
         blocks.append("\n".join(lines))
 
-    header = f"📰 <b>Yargı paketi / infaz haberleri</b> — {now}"
+    header = f"📰 <b>Yargı paketi / infaz / günlük haberler</b> — {now}"
     messages, current = [], header
     for block in blocks:
         if len(current) + len(block) + 2 > CHUNK_LIMIT:
@@ -198,8 +241,13 @@ def main():
         print("Test mesajı gönderildi.")
         return
 
-    sections, failed = collect()
-    if failed == len(FEEDS):
+    used, sections, failed = set(), [], 0
+    keyword_sections, keyword_failed = collect(used)
+    daily_sections, daily_failed = collect_daily(used)
+    sections.extend(keyword_sections)
+    sections.extend(daily_sections)
+    failed = keyword_failed + daily_failed
+    if failed == len(FEEDS) + len(DAILY_FEEDS):
         sys.exit("Hiçbir haber kaynağına ulaşılamadı.")
     if not sections:
         print("Konuya uyan yeni haber yok, mesaj gönderilmedi.")
